@@ -4,6 +4,48 @@ import Dispatch
 import Foundation
 import SPSCQueue
 
+private protocol BenchmarkQueue: Sendable {
+    func tryPush(_ element: UInt64) -> Bool
+    func pop() -> UInt64?
+}
+
+extension SPSCQueue: BenchmarkQueue where Element == UInt64 {}
+
+/// Bounded FIFO used by one producer and one consumer. All mutable state is
+/// protected by the same lock; unsuccessful attempts release it before retrying.
+private final class LockedSPSCQueue: BenchmarkQueue, @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [UInt64]
+    private var readIndex = 0
+    private var writeIndex = 0
+    private var count = 0
+
+    init(capacity: Int) {
+        precondition(capacity > 0, "capacity must be greater than zero")
+        storage = Array(repeating: 0, count: capacity)
+    }
+
+    func tryPush(_ element: UInt64) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard count < storage.count else { return false }
+        storage[writeIndex] = element
+        writeIndex = writeIndex + 1 == storage.count ? 0 : writeIndex + 1
+        count += 1
+        return true
+    }
+
+    func pop() -> UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard count > 0 else { return nil }
+        let element = storage[readIndex]
+        readIndex = readIndex + 1 == storage.count ? 0 : readIndex + 1
+        count -= 1
+        return element
+    }
+}
+
 private struct BenchmarkResult {
     let checksum: UInt64
     let seconds: Double
@@ -41,15 +83,13 @@ private func benchmarkWorker(
 }
 
 private enum Benchmark {
-    static func runOnce(
-        configuration: BenchmarkConfiguration
+    static func runOnce<Queue: BenchmarkQueue>(
+        configuration: BenchmarkConfiguration,
+        queue: Queue
     ) -> BenchmarkResult {
         let totalOperations = configuration.totalOperations
-        let queue = SPSCQueue<UInt64>(
-            capacity: configuration.queueCapacity
-        )
-        let ready = ManagedAtomic<Int>(0)
-        let start = ManagedAtomic<Bool>(false)
+        let ready: ManagedAtomic<Int> = ManagedAtomic<Int>(0)
+        let start: ManagedAtomic<Bool> = ManagedAtomic<Bool>(false)
         let checksum = ChecksumBox()
 
         let producerContext = WorkerContext {
@@ -69,6 +109,7 @@ private enum Benchmark {
             var localChecksum: UInt64 = 0
             while consumed < totalOperations {
                 if let value = queue.pop() {
+                    precondition(value == UInt64(consumed), "FIFO order mismatch")
                     localChecksum &+= value
                     consumed += 1
                 }
@@ -134,12 +175,29 @@ private enum Benchmark {
                 : 10
         )
 
+        print("One operation = one successful enqueue/dequeue transfer")
+        runQueue(name: "Swift SPSCQueue", configuration: configuration) {
+            SPSCQueue<UInt64>(capacity: configuration.queueCapacity)
+        }
+        runQueue(name: "Swift NSLock SPSCQueue", configuration: configuration) {
+            LockedSPSCQueue(capacity: configuration.queueCapacity)
+        }
+    }
+
+    private static func runQueue<Queue: BenchmarkQueue>(
+        name: String,
+        configuration: BenchmarkConfiguration,
+        makeQueue: () -> Queue
+    ) {
         let operationCount = UInt64(configuration.totalOperations)
-        let expectedChecksum = operationCount &* (operationCount &- 1) / 2
+        // Divide before multiplying so the modulo-UInt64 sum remains correct.
+        let expectedChecksum = operationCount.isMultiple(of: 2)
+            ? (operationCount / 2) &* (operationCount - 1)
+            : operationCount &* ((operationCount - 1) / 2)
         var best: BenchmarkResult?
         var totalSeconds = 0.0
 
-        print("Swift SPSCQueue benchmark")
+        print("\(name) benchmark")
         print(
             "totalOps=\(configuration.totalOperations) " +
             "capacity=\(configuration.queueCapacity) " +
@@ -147,7 +205,7 @@ private enum Benchmark {
         )
 
         for round in 1...configuration.rounds {
-            let result = runOnce(configuration: configuration)
+            let result = runOnce(configuration: configuration, queue: makeQueue())
             precondition(
                 result.checksum == expectedChecksum,
                 "checksum mismatch: expected=\(expectedChecksum) " +

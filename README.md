@@ -44,6 +44,12 @@ swift test
 
 Both benchmarks default to 20,000,000 transfers through a 65,536-element queue
 for 10 rounds. Optional arguments are `totalOps`, `capacity`, and `rounds`.
+The Swift executable runs both the lock-free queue and an `NSLock`-protected
+ring buffer using the same producer/consumer harness. One operation means one
+completed enqueue/dequeue transfer. Duration is measured in seconds, throughput
+in millions of transfers per second (Mops/s), and latency in nanoseconds per
+transfer (`ns_per_op`). The latter is elapsed time divided by transfer count,
+rather than an individually measured enqueue or dequeue latency.
 
 ```sh
 swift build -c release --product swift-spsc-benchmark \
@@ -105,6 +111,36 @@ round=10 seconds=0.524953 throughput_mops=38.10 ns_per_op=26.25
 best_seconds=0.340041 best_throughput_mops=58.82 best_ns_per_op=17.00
 avg_seconds=0.487392 avg_throughput_mops=41.03 avg_ns_per_op=24.37
 ```
+
+### Swift queue with NSLock
+
+The lock-based queue was rerun with `totalOps=20000000 capacity=65536 rounds=10`:
+
+```sh
+.build/release/swift-spsc-benchmark 20000000 65536 10
+```
+
+```text
+Swift NSLock SPSCQueue benchmark
+totalOps=20000000 capacity=65536 rounds=10
+round=1 seconds=3.690615 throughput_mops=5.42 ns_per_op=184.53
+round=2 seconds=3.912904 throughput_mops=5.11 ns_per_op=195.65
+round=3 seconds=3.987343 throughput_mops=5.02 ns_per_op=199.37
+round=4 seconds=3.885577 throughput_mops=5.15 ns_per_op=194.28
+round=5 seconds=3.694432 throughput_mops=5.41 ns_per_op=184.72
+round=6 seconds=3.832400 throughput_mops=5.22 ns_per_op=191.62
+round=7 seconds=4.154782 throughput_mops=4.81 ns_per_op=207.74
+round=8 seconds=3.731772 throughput_mops=5.36 ns_per_op=186.59
+round=9 seconds=4.081564 throughput_mops=4.90 ns_per_op=204.08
+round=10 seconds=2.599069 throughput_mops=7.70 ns_per_op=129.95
+best_seconds=2.599069 best_throughput_mops=7.70 best_ns_per_op=129.95
+avg_seconds=3.757046 avg_throughput_mops=5.32 avg_ns_per_op=187.85
+```
+
+All rounds passed FIFO order and checksum validation. In the same run, the
+lock-free Swift queue averaged 0.418650 seconds, 47.77 Mops/s, and 20.93 ns per
+transfer. The average throughput for each queue is calculated from its average
+round duration.
 
 Results vary with thread scheduling, CPU frequency, thermal state, and other
 system activity, so averages or medians across repeated, alternating runs are
